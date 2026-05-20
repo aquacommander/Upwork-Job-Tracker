@@ -21,20 +21,33 @@ async function getActiveUpworkTab() {
   return tab;
 }
 
+function scoreExtraction(data) {
+  if (!data?.lastViewed || !isValidLastViewedDisplay(data.lastViewed)) return -1;
+  let s = lastViewedSpecificityScore(data.lastViewed);
+  if (data.lastViewedSource?.startsWith('activity')) s += 50;
+  return s;
+}
+
 async function extractDataFromTab(tabId) {
-  let lastData = null;
-  for (let attempt = 0; attempt < 4; attempt++) {
+  let bestData = null;
+  let bestScore = -1;
+  for (let attempt = 0; attempt < 5; attempt++) {
     if (attempt > 0) await new Promise((r) => setTimeout(r, 1000));
     const [result] = await chrome.scripting.executeScript({
       target: { tabId },
       func: extractionScript
     });
-    lastData = result?.result || null;
-    if (!lastData) continue;
-    if (lastData.captchaDetected) return lastData;
-    if (lastData.lastViewed && isValidLastViewedDisplay(lastData.lastViewed)) return lastData;
+    const data = result?.result || null;
+    if (!data) continue;
+    if (data.captchaDetected) return data;
+    const score = scoreExtraction(data);
+    if (score > bestScore) {
+      bestScore = score;
+      bestData = data;
+    }
+    if (score >= 150) return data;
   }
-  return lastData;
+  return bestData;
 }
 
 function formatTime(minutes) {
@@ -51,7 +64,50 @@ function formatTime(minutes) {
 
 function formatChangeTime(timestamp) {
   if (!timestamp) return '';
-  return new Date(timestamp).toLocaleTimeString();
+  return new Date(timestamp).toLocaleString();
+}
+
+function renderComparisonLogs(job) {
+  let html = '';
+
+  if (job.lastComparison) {
+    const c = job.lastComparison;
+    const time = formatChangeTime(c.at);
+    let line = '';
+    let cssClass = 'compare-log';
+
+    if (c.error) {
+      line = `<b>Last check:</b> could not read page (kept "${escapeHtml(c.previous)}")`;
+      cssClass += ' compare-error';
+    } else if (c.skipped) {
+      line = `<b>Last check:</b> ${escapeHtml(c.previous)} <span class="compare-arrow">→</span> <span class="compare-skipped">${escapeHtml(c.current)}</span> <span class="compare-note">(ignored bad read)</span>`;
+    } else if (c.changed) {
+      line = `<b>Last check:</b> ${escapeHtml(c.previous)} <span class="compare-arrow">→</span> <span class="compare-new">${escapeHtml(c.current)}</span>`;
+      if (c.notified) line += ' <span class="compare-notify">· notified</span>';
+    } else {
+      line = `<b>Last check:</b> ${escapeHtml(c.previous)} <span class="compare-arrow">→</span> ${escapeHtml(c.current)} <span class="compare-note">(no change)</span>`;
+    }
+
+    html += `<div class="${cssClass}">${line}<br><small>${escapeHtml(time)}${c.source ? ' · ' + escapeHtml(c.source) : ''}</small></div>`;
+  } else if (job.previousLastViewed != null && job.previousLastViewed !== job.lastViewed) {
+    html += `
+      <div class="compare-log">
+        <b>Last change:</b> ${escapeHtml(job.previousLastViewed)} <span class="compare-arrow">→</span> ${escapeHtml(job.lastViewed)}<br>
+        <small>${formatChangeTime(job.lastChangeTime)}</small>
+      </div>
+    `;
+  }
+
+  if (job.changeHistory?.length) {
+    html += '<div class="compare-history"><b>Change history:</b>';
+    job.changeHistory.slice(0, 8).forEach((entry) => {
+      const flag = entry.notified ? ' · notified' : '';
+      html += `<div class="history-row">${escapeHtml(entry.from)} <span class="compare-arrow">→</span> ${escapeHtml(entry.to)}<br><small>${formatChangeTime(entry.at)}${flag}</small></div>`;
+    });
+    html += '</div>';
+  }
+
+  return html;
 }
 
 async function renderJobs() {
@@ -78,19 +134,7 @@ async function renderJobs() {
       warningHtml = `<div class="warning-banner">⚠ ${escapeHtml(job.lastExtractionError)}</div>`;
     }
 
-    let changeLogHtml = '';
-    if (job.previousLastViewed != null && job.previousLastViewed !== job.lastViewed) {
-      const prevDisplay = job.previousLastViewed;
-      const newDisplay = job.lastViewed;
-      const changeTime = formatChangeTime(job.lastChangeTime);
-      changeLogHtml = `
-        <div class="change-log">
-          <b>Last viewed changed:</b><br>
-          ${escapeHtml(prevDisplay)} → ${escapeHtml(newDisplay)}<br>
-          <small>${changeTime ? 'detected at ' + changeTime : ''}</small>
-        </div>
-      `;
-    }
+    const comparisonLogHtml = renderComparisonLogs(job);
 
     const div = document.createElement('div');
     div.className = 'job-item' + (job.needsVerification ? ' needs-verification' : '');
@@ -106,7 +150,7 @@ async function renderJobs() {
       <div class="details">
         <b>Last viewed by client:</b> ${lastViewedContent}
       </div>
-      ${changeLogHtml}
+      ${comparisonLogHtml}
       <div class="interval-row">
         <label>Check every (min):</label>
         <input type="number" class="interval-input" value="${job.checkInterval}" min="1" data-id="${job.id}">
@@ -193,8 +237,8 @@ addBtn.addEventListener('click', async () => {
 
     logDebug(`Title: "${data.title}"`);
     logDebug(`Proposals: "${data.proposals}"`);
-    logDebug(`Last viewed: "${data.lastViewed}" (source: ${data.lastViewedSource})`);
-    logDebug(`Parsed minutes: ${parseRelativeMinutes(data.lastViewed)}`);
+    logDebug(`Last viewed: "${data.lastViewed}" (source: ${data.lastViewedSource}, candidates: ${data.lastViewedCandidates || '?'})`);
+    logDebug(`Parsed minutes: ${parseRelativeMinutes(data.lastViewed)}, specificity: ${lastViewedSpecificityScore(data.lastViewed)}`);
 
     if (!isValidLastViewedDisplay(data.lastViewed)) {
       throw new Error(

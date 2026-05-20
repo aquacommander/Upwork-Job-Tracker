@@ -33,15 +33,29 @@
     }
     .job-title { font-weight: bold; margin-bottom: 4px; word-break: break-word; }
     .details { font-size: 12px; color: #555; line-height: 1.5; }
-    .change-log {
+    .compare-log, .compare-history {
       margin-top: 6px;
-      padding: 4px 6px;
+      padding: 6px 8px;
       background: #fff;
       border: 1px solid #ddd;
       border-radius: 4px;
       font-size: 11px;
       color: #333;
+      line-height: 1.5;
     }
+    .compare-history { margin-top: 4px; background: #fafafa; }
+    .compare-history .history-row {
+      margin-top: 4px;
+      padding-top: 4px;
+      border-top: 1px dashed #e0e0e0;
+    }
+    .compare-history .history-row:first-of-type { border-top: none; padding-top: 0; }
+    .compare-arrow { color: #888; }
+    .compare-new { color: #c0392b; font-weight: 600; }
+    .compare-skipped { color: #e67e22; text-decoration: line-through; }
+    .compare-note { color: #888; font-weight: normal; }
+    .compare-notify { color: #27ae60; font-weight: 600; }
+    .compare-error { border-color: #e74c3c; background: #fde8e8; }
     .interval-row {
       margin-top: 8px; display: flex; align-items: center; gap: 6px;
     }
