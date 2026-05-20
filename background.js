@@ -36,18 +36,34 @@ async function extractFromTab(tabId) {
   return result?.result || null;
 }
 
+/** Pick the best result across retries (prefer specific times like "17 hours ago" over "yesterday"). */
+function scoreExtractionResult(data) {
+  if (!data?.lastViewed || !isValidLastViewedDisplay(data.lastViewed)) return -1;
+  let score = lastViewedSpecificityScore(data.lastViewed);
+  if (data.lastViewedSource?.startsWith('activity')) score += 50;
+  if (data.lastViewedSource === 'data-test') score += 40;
+  return score;
+}
+
 /** Retry extraction — Upwork SPA often renders stats after 'complete'. */
-async function extractFromTabWithRetry(tabId, maxAttempts = 5, delayMs = 1200) {
-  let lastData = null;
+async function extractFromTabWithRetry(tabId, maxAttempts = 6, delayMs = 1200) {
+  let bestData = null;
+  let bestScore = -1;
+
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (attempt > 0) await sleep(delayMs);
-    lastData = await extractFromTab(tabId);
-    if (!lastData) continue;
-    if (lastData.captchaDetected) return lastData;
-    if (lastData.lastViewed && isValidLastViewedDisplay(lastData.lastViewed)) return lastData;
-    if (lastData.pageReady && attempt >= maxAttempts - 1) return lastData;
+    const data = await extractFromTab(tabId);
+    if (!data) continue;
+    if (data.captchaDetected) return data;
+
+    const score = scoreExtractionResult(data);
+    if (score > bestScore) {
+      bestScore = score;
+      bestData = data;
+    }
+    if (score >= 150) return data;
   }
-  return lastData;
+  return bestData;
 }
 
 function notifyClientViewed(job, lastViewedDisplay) {
@@ -74,6 +90,27 @@ function updateSecondaryFields(job, data) {
   if (data.interviewing) job.interviewing = data.interviewing;
   if (data.invitesSent) job.invitesSent = data.invitesSent;
   if (data.unansweredInvites) job.unansweredInvites = data.unansweredInvites;
+}
+
+function recordComparison(job, entry) {
+  job.lastComparison = {
+    at: Date.now(),
+    previous: entry.previous ?? '(none)',
+    current: entry.current ?? '(unknown)',
+    changed: !!entry.changed,
+    notified: !!entry.notified,
+    skipped: !!entry.skipped,
+    reason: entry.reason || null,
+    error: !!entry.error,
+    source: entry.source || null
+  };
+}
+
+function appendChangeHistory(job, from, to, notified) {
+  if (!from || !to || normalizeLastViewedText(from) === normalizeLastViewedText(to)) return;
+  if (!job.changeHistory) job.changeHistory = [];
+  job.changeHistory.unshift({ at: Date.now(), from, to, notified: !!notified });
+  job.changeHistory = job.changeHistory.slice(0, 20);
 }
 
 // ---------- REFRESH HANDLER ----------
@@ -110,6 +147,13 @@ async function processRefreshedTab(tabId, tabUrl) {
       console.warn(`[Upwork Tracker] CAPTCHA detected on tab ${tabId} for "${job.title}".`);
       job.needsVerification = true;
       job.lastExtractionError = 'CAPTCHA or security verification detected.';
+      recordComparison(job, {
+        previous: job.lastViewed || '(none)',
+        current: '(CAPTCHA / verification)',
+        changed: false,
+        error: true,
+        reason: 'captcha'
+      });
       const now = Date.now();
       if (!job.lastCaptchaAlertAt || now - job.lastCaptchaAlertAt > 30 * 60 * 1000) {
         job.lastCaptchaAlertAt = now;
@@ -131,6 +175,13 @@ async function processRefreshedTab(tabId, tabUrl) {
         `[Upwork Tracker] Could not read valid "Last viewed by client" on tab ${tabId} (source: ${newData.lastViewedSource}). Keeping previous value: "${oldRaw}".`
       );
       job.lastExtractionError = 'Could not read "Last viewed by client" from page. Tab left unchanged.';
+      recordComparison(job, {
+        previous: oldRaw,
+        current: '(read failed)',
+        changed: false,
+        error: true,
+        source: newData.lastViewedSource
+      });
       jobs[jobIndex] = job;
       await chrome.storage.local.set({ jobs });
       return;
@@ -142,9 +193,36 @@ async function processRefreshedTab(tabId, tabUrl) {
     console.log(`[Upwork Tracker] Tab ${tabId} refreshed (source: ${newData.lastViewedSource}).`);
     console.log(`  Stored: "${oldRaw}" (${oldMinutes} min) -> Page: "${newRaw}" (${newMinutes} min)`);
 
+    if (isLikelyExtractionRegression(oldRaw, newRaw, oldMinutes, newMinutes)) {
+      console.warn(
+        `[Upwork Tracker] Rejected ambiguous read "${newRaw}" (keeping "${oldRaw}"). Page likely still shows a more specific time.`
+      );
+      job.lastExtractionError = `Kept "${oldRaw}" — page read "${newRaw}" looked incorrect. Will retry next refresh.`;
+      recordComparison(job, {
+        previous: oldRaw,
+        current: newRaw,
+        changed: false,
+        skipped: true,
+        reason: 'rejected-read',
+        source: newData.lastViewedSource
+      });
+      jobs[jobIndex] = job;
+      await chrome.storage.local.set({ jobs });
+      return;
+    }
+
     const { notify, reason } = shouldNotifyClientViewed(oldMinutes, newMinutes, oldRaw, newRaw);
 
     const rawChanged = normalizeLastViewedText(oldRaw) !== normalizeLastViewedText(newRaw);
+
+    recordComparison(job, {
+      previous: oldRaw || '(none)',
+      current: newRaw,
+      changed: rawChanged,
+      notified: notify,
+      reason: rawChanged ? reason : 'unchanged',
+      source: newData.lastViewedSource
+    });
 
     if (rawChanged && newMinutes != null) {
       job.previousLastViewed = oldRaw || null;
@@ -152,6 +230,7 @@ async function processRefreshedTab(tabId, tabUrl) {
       job.lastViewed = newRaw;
       job.lastViewedMinutes = newMinutes;
       job.lastChangeTime = Date.now();
+      appendChangeHistory(job, oldRaw, newRaw, notify);
     } else if (!oldRaw && newMinutes != null) {
       job.lastViewed = newRaw;
       job.lastViewedMinutes = newMinutes;
@@ -276,7 +355,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           lastCaptchaAlertAt: null,
           previousLastViewed: null,
           previousLastViewedMinutes: null,
-          lastChangeTime: null
+          lastChangeTime: null,
+          lastComparison: {
+            at: Date.now(),
+            previous: '(added)',
+            current: lastViewed,
+            changed: false,
+            notified: false,
+            source: lastViewedSource || 'manual-add'
+          },
+          changeHistory: []
         };
 
         const updatedJobs = jobs ? [...jobs, newJob] : [newJob];
