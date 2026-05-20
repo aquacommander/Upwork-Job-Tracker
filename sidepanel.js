@@ -1,4 +1,5 @@
-// sidepanel.js
+// sidepanel.js — relies on extractor-shared.js loaded first in sidepanel.html
+
 const jobListEl = document.getElementById('job-list');
 const addBtn = document.getElementById('add-btn');
 const statusEl = document.getElementById('status');
@@ -11,49 +12,31 @@ debugToggle.addEventListener('click', () => {
 });
 
 function logDebug(msg) {
-  debugSection.innerHTML += `<div>${new Date().toLocaleTimeString()}: ${msg}</div>`;
+  debugSection.innerHTML += `<div>${new Date().toLocaleTimeString()}: ${escapeHtml(msg)}</div>`;
   debugSection.scrollTop = debugSection.scrollHeight;
 }
 
-function extractionScript() {
-  const bodyText = document.body.innerText;
-  const title = (
-    document.querySelector('h1')?.innerText ||
-    document.querySelector('[data-test="job-title"]')?.innerText ||
-    document.querySelector('.job-title')?.innerText ||
-    document.title.replace(' - Upwork', '').trim()
-  ).trim();
-
-  const proposalsMatch = bodyText.match(/Proposals:\s*([\d,\-–to\s]+?)(?=\n|Interviewing|Last viewed|Invites sent|Unanswered|$)/i);
-  const proposals = proposalsMatch ? proposalsMatch[1].trim() : '';
-
-  const lastViewedMatch = bodyText.match(/Last viewed by client:\s*(.+?)(?:\n|This is when|Interviewing|Invites sent|Unanswered|$)/i);
-  const lastViewed = lastViewedMatch ? lastViewedMatch[1].trim() : '';
-
-  const interviewingMatch = bodyText.match(/Interviewing:\s*(\d+)/i);
-  const interviewing = interviewingMatch ? interviewingMatch[1] : '';
-
-  const invitesSentMatch = bodyText.match(/Invites sent:\s*(\d+)/i);
-  const invitesSent = invitesSentMatch ? invitesSentMatch[1] : '';
-
-  const unansweredInvitesMatch = bodyText.match(/Unanswered invites:\s*(\d+)/i);
-  const unansweredInvites = unansweredInvitesMatch ? unansweredInvitesMatch[1] : '';
-
-  return { title, proposals, lastViewed, interviewing, invitesSent, unansweredInvites };
+async function getActiveUpworkTab() {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return tab;
 }
 
 async function extractDataFromTab(tabId) {
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: extractionScript
-  });
-  if (!result || !result.result) {
-    throw new Error('Script executed but returned no data. The page may not be fully loaded.');
+  let lastData = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 1000));
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: extractionScript
+    });
+    lastData = result?.result || null;
+    if (!lastData) continue;
+    if (lastData.captchaDetected) return lastData;
+    if (lastData.lastViewed && isValidLastViewedDisplay(lastData.lastViewed)) return lastData;
   }
-  return result.result;
+  return lastData;
 }
 
-// Format relative time for display (e.g., "2 hours ago")
 function formatTime(minutes) {
   if (minutes == null) return '(unknown)';
   if (minutes === 0) return 'just now';
@@ -68,19 +51,18 @@ function formatTime(minutes) {
 
 function formatChangeTime(timestamp) {
   if (!timestamp) return '';
-  const d = new Date(timestamp);
-  return d.toLocaleTimeString();
+  return new Date(timestamp).toLocaleTimeString();
 }
 
 async function renderJobs() {
   const { jobs } = await chrome.storage.local.get('jobs');
   jobListEl.innerHTML = '';
-  if (!jobs || jobs.length === 0) {
+  if (!jobs?.length) {
     jobListEl.innerHTML = '<p style="color:#888; text-align:center;">No job postings added yet.</p>';
     return;
   }
-  jobs.forEach(job => {
-    // Last viewed display (bold red or REFRESHING...)
+
+  jobs.forEach((job) => {
     let lastViewedContent;
     if (job.pendingRefresh) {
       lastViewedContent = '<span style="color: #e67e22; font-weight: bold;">REFRESHING...</span>';
@@ -88,36 +70,41 @@ async function renderJobs() {
       lastViewedContent = `<span style="color: red; font-weight: bold;">${escapeHtml(job.lastViewed) || 'unknown'}</span>`;
     }
 
-    // --- CHANGE LOG (previous -> new) ---
+    let warningHtml = '';
+    if (job.needsVerification) {
+      warningHtml =
+        '<div class="warning-banner">⚠ CAPTCHA / verification detected. Open the tab, complete it, then remove and re-add this job.</div>';
+    } else if (job.lastExtractionError) {
+      warningHtml = `<div class="warning-banner">⚠ ${escapeHtml(job.lastExtractionError)}</div>`;
+    }
+
     let changeLogHtml = '';
-    if (job.previousLastViewed !== null && job.previousLastViewed !== undefined) {
-      const prevTime = job.previousLastViewedMinutes != null
-        ? formatTime(job.previousLastViewedMinutes)
-        : job.previousLastViewed;
-      const newTime = job.lastViewedMinutes != null
-        ? formatTime(job.lastViewedMinutes)
-        : job.lastViewed;
+    if (job.previousLastViewed != null && job.previousLastViewed !== job.lastViewed) {
+      const prevDisplay = job.previousLastViewed;
+      const newDisplay = job.lastViewed;
       const changeTime = formatChangeTime(job.lastChangeTime);
       changeLogHtml = `
         <div class="change-log">
-          <b>Change:</b> ${escapeHtml(prevTime)} → ${escapeHtml(newTime)}<br>
-          <small>${changeTime ? 'at ' + changeTime : ''}</small>
+          <b>Last viewed changed:</b><br>
+          ${escapeHtml(prevDisplay)} → ${escapeHtml(newDisplay)}<br>
+          <small>${changeTime ? 'detected at ' + changeTime : ''}</small>
         </div>
       `;
     }
 
     const div = document.createElement('div');
-    div.className = 'job-item';
+    div.className = 'job-item' + (job.needsVerification ? ' needs-verification' : '');
     div.innerHTML = `
       <div class="job-title">${escapeHtml(job.title) || '(no title)'}</div>
+      ${warningHtml}
       <div class="details">
-        <b>Proposals:</b> ${job.proposals || '?'}<br>
-        <b>Interviewing:</b> ${job.interviewing || '0'} | 
-        <b>Invites:</b> ${job.invitesSent || '0'} | 
-        <b>Unanswered:</b> ${job.unansweredInvites || '0'}
+        <b>Proposals:</b> ${escapeHtml(job.proposals) || '?'}<br>
+        <b>Interviewing:</b> ${escapeHtml(job.interviewing) || '0'} |
+        <b>Invites:</b> ${escapeHtml(job.invitesSent) || '0'} |
+        <b>Unanswered:</b> ${escapeHtml(job.unansweredInvites) || '0'}
       </div>
       <div class="details">
-        <b>Last viewed:</b> ${lastViewedContent}
+        <b>Last viewed by client:</b> ${lastViewedContent}
       </div>
       ${changeLogHtml}
       <div class="interval-row">
@@ -129,18 +116,25 @@ async function renderJobs() {
     jobListEl.appendChild(div);
   });
 
-  document.querySelectorAll('.interval-input').forEach(input => {
+  document.querySelectorAll('.interval-input').forEach((input) => {
     input.addEventListener('change', async (e) => {
       const id = e.target.dataset.id;
       const newInterval = parseInt(e.target.value, 10);
       if (newInterval > 0) {
-        await chrome.runtime.sendMessage({ action: 'updateInterval', id, checkInterval: newInterval });
+        const response = await chrome.runtime.sendMessage({
+          action: 'updateInterval',
+          id,
+          checkInterval: newInterval
+        });
+        if (!response?.success) {
+          setStatus('❌ ' + (response?.error || 'Failed to update interval'), 'error');
+        }
         await renderJobs();
       }
     });
   });
 
-  document.querySelectorAll('.remove-btn').forEach(btn => {
+  document.querySelectorAll('.remove-btn').forEach((btn) => {
     btn.addEventListener('click', async (e) => {
       const id = e.target.dataset.id;
       await chrome.runtime.sendMessage({ action: 'removeJob', id });
@@ -157,7 +151,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
 function escapeHtml(text) {
   const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-  return String(text).replace(/[&<>"']/g, m => map[m]);
+  return String(text).replace(/[&<>"']/g, (m) => map[m]);
 }
 
 function setStatus(msg, type) {
@@ -171,31 +165,41 @@ addBtn.addEventListener('click', async () => {
   logDebug('Starting add process...');
 
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = await getActiveUpworkTab();
     logDebug(`Active tab ID: ${tab?.id}, URL: ${tab?.url}`);
 
-    if (!tab || !tab.id) {
-      throw new Error('No active tab found. Please open an Upwork job posting first.');
+    if (!tab?.id) {
+      throw new Error('No active tab found. Open an Upwork job page in this window first.');
     }
 
-    const upworkJobPattern = /^https?:\/\/.*\.upwork\.com\/(freelance-)?jobs\//;
-    logDebug(`URL check: "${tab.url}" matches pattern? ${upworkJobPattern.test(tab.url)}`);
-
-    if (!upworkJobPattern.test(tab.url)) {
-      throw new Error(`This does not look like an Upwork job posting. URL: ${tab.url}`);
+    if (!isUpworkJobUrl(tab.url)) {
+      throw new Error(
+        'This tab is not an Upwork job page. Open a job from upwork.com (URL should contain /jobs/ or /freelance-jobs/).'
+      );
     }
 
-    logDebug('Injecting extraction script...');
+    logDebug('Reading page (may retry while SPA loads)...');
     const data = await extractDataFromTab(tab.id);
-    logDebug(`Extracted - Title: "${data.title}"`);
-    logDebug(`Extracted - Proposals: "${data.proposals}"`);
-    logDebug(`Extracted - Last Viewed: "${data.lastViewed}"`);
-    logDebug(`Extracted - Interviewing: "${data.interviewing}"`);
-    logDebug(`Extracted - Invites Sent: "${data.invitesSent}"`);
-    logDebug(`Extracted - Unanswered Invites: "${data.unansweredInvites}"`);
 
-    if (!data.title && !data.lastViewed) {
-      throw new Error('Could not extract any data from the page.');
+    if (!data) {
+      throw new Error('Could not read the page. Wait for it to finish loading, then try again.');
+    }
+
+    if (data.captchaDetected) {
+      throw new Error(
+        'CAPTCHA or security verification is showing. Complete it in the tab, then add the job again.'
+      );
+    }
+
+    logDebug(`Title: "${data.title}"`);
+    logDebug(`Proposals: "${data.proposals}"`);
+    logDebug(`Last viewed: "${data.lastViewed}" (source: ${data.lastViewedSource})`);
+    logDebug(`Parsed minutes: ${parseRelativeMinutes(data.lastViewed)}`);
+
+    if (!isValidLastViewedDisplay(data.lastViewed)) {
+      throw new Error(
+        'Could not find "Last viewed by client" on this page. Scroll to the Activity / Proposals block and try again.'
+      );
     }
 
     logDebug('Sending to background...');
@@ -207,6 +211,7 @@ addBtn.addEventListener('click', async () => {
         title: data.title,
         proposals: data.proposals,
         lastViewed: data.lastViewed,
+        lastViewedSource: data.lastViewedSource,
         interviewing: data.interviewing,
         invitesSent: data.invitesSent,
         unansweredInvites: data.unansweredInvites,
@@ -215,17 +220,20 @@ addBtn.addEventListener('click', async () => {
     });
 
     logDebug(`Background response: ${JSON.stringify(response)}`);
+
+    if (!response) {
+      throw new Error('No response from extension background. Reload the extension at chrome://extensions.');
+    }
     if (response.success) {
-      setStatus('✅ Job added successfully!', 'success');
+      setStatus(`Job added. Last viewed: ${data.lastViewed}`, 'success');
       await renderJobs();
     } else {
       setStatus('❌ ' + (response.error || 'Failed to add job'), 'error');
     }
   } catch (err) {
-    logDebug(`❌ ERROR: ${err.message}`);
+    logDebug(`ERROR: ${err.message}`);
     setStatus('❌ ' + err.message, 'error');
   }
 });
 
-// Initial render
 renderJobs();
