@@ -64,63 +64,46 @@ function getStatusPill(job) {
   return { class: 'live', text: 'Tracking' };
 }
 
-function renderLastViewedBlock(job) {
+function renderLastViewedRow(job) {
   if (job.pendingRefresh) {
-    return `
-      <div class="last-viewed-block">
-        <div class="last-viewed-label">Last viewed by client</div>
-        <div class="last-viewed-value refreshing">Reloading job tab…</div>
-      </div>`;
-  }
-
-  if (job.awaitingFirstView || !job.lastViewed) {
-    return `
-      <div class="last-viewed-block">
-        <div class="last-viewed-label">Last viewed by client</div>
-        <div class="last-viewed-value muted">Not viewed yet</div>
-        <div class="last-viewed-meta">You will be alerted the moment Upwork shows a time.</div>
-      </div>`;
-  }
-
-  const secs = getJobLastViewedSeconds(job);
-  const meta = secs != null ? `≈ ${secs.toLocaleString()} seconds ago (internal compare)` : '';
-
-  return `
-    <div class="last-viewed-block">
-      <div class="last-viewed-label">Last viewed by client</div>
-      <div class="last-viewed-value">${escapeHtml(job.lastViewed)}</div>
-      ${meta ? `<div class="last-viewed-meta">${escapeHtml(meta)}</div>` : ''}
+    return `<div class="last-viewed-row">
+      <span class="last-viewed-label">Last viewed</span>
+      <span class="last-viewed-value refreshing">Reloading…</span>
     </div>`;
   }
 
-function renderChangeAndCheck(job) {
-  let html = '';
+  if (job.awaitingFirstView || !job.lastViewed) {
+    return `<div class="last-viewed-row">
+      <span class="last-viewed-label">Last viewed</span>
+      <span class="last-viewed-value muted">Not yet</span>
+    </div>`;
+  }
+
+  return `<div class="last-viewed-row">
+    <span class="last-viewed-label">Last viewed</span>
+    <span class="last-viewed-value">${escapeHtml(job.lastViewed)}</span>
+  </div>`;
+}
+
+function renderMetaLines(job) {
+  const parts = [];
 
   const change = job.lastMeaningfulChange;
   if (change?.from && change?.to) {
-    const flag = change.notified
-      ? '<span class="change-notified">Alert sent</span>'
-      : '';
-    html += `
-      <div class="change-row">
-        <div class="label">Last client view change</div>
-        <span class="change-from">${escapeHtml(change.from)}</span>
-        <span class="change-arrow">→</span>
-        <span class="change-to">${escapeHtml(change.to)}</span>
-        ${flag}
-        <div class="last-viewed-meta">${escapeHtml(formatChangeTime(change.at))}</div>
-      </div>`;
+    const flag = change.notified ? ' · <span class="change-notified">alert</span>' : '';
+    parts.push(
+      `Change: <span class="change-from">${escapeHtml(change.from)}</span><span class="change-arrow">→</span><span class="change-to">${escapeHtml(change.to)}</span>${flag}`
+    );
   }
 
   if (job.lastComparison && !job.lastComparison.error) {
     const c = job.lastComparison;
-    let checkText = `Last sync: ${escapeHtml(c.current)}`;
-    if (c.reason === 'synced') checkText += ' (page time advanced)';
-    if (c.notified) checkText += ' · alert sent';
-    html += `<div class="check-row">${checkText}<br><small>${escapeHtml(formatChangeTime(c.at))}</small></div>`;
+    const sync = formatChangeTime(c.at);
+    if (sync) parts.push(`Synced ${escapeHtml(sync)}`);
   }
 
-  return html;
+  if (!parts.length) return '';
+  return `<div class="meta-line">${parts.join('<span class="stats-dot">·</span>')}</div>`;
 }
 
 async function renderJobs() {
@@ -161,12 +144,14 @@ async function renderJobs() {
       </div>
       ${bannerHtml}
       <div class="stats-row">
-        <span class="stat-chip">Proposals <b>${escapeHtml(job.proposals) || '?'}</b></span>
-        <span class="stat-chip">Interviewing <b>${escapeHtml(job.interviewing) || '0'}</b></span>
-        <span class="stat-chip">Invites <b>${escapeHtml(job.invitesSent) || '0'}</b></span>
+        <b>${escapeHtml(job.proposals) || '?'}</b> proposals
+        <span class="stats-dot">·</span>
+        <b>${escapeHtml(job.interviewing) || '0'}</b> interviewing
+        <span class="stats-dot">·</span>
+        <b>${escapeHtml(job.invitesSent) || '0'}</b> invites
       </div>
-      ${renderLastViewedBlock(job)}
-      ${renderChangeAndCheck(job)}
+      ${renderLastViewedRow(job)}
+      ${renderMetaLines(job)}
       <div class="card-footer">
         <label for="interval-${job.id}">Check every</label>
         <input type="number" id="interval-${job.id}" class="interval-input" value="${job.checkInterval}" min="1" data-id="${job.id}">
@@ -289,4 +274,140 @@ addBtn.addEventListener('click', async () => {
   }
 });
 
+// ---------- Appearance / themes ----------
+const bgLayer = document.getElementById('bg-layer');
+const themeGrid = document.getElementById('theme-grid');
+const settingsToggle = document.getElementById('settings-toggle');
+const settingsBody = document.getElementById('settings-body');
+const settingsSummary = document.getElementById('settings-summary');
+const bgPickBtn = document.getElementById('bg-pick-btn');
+const bgClearBtn = document.getElementById('bg-clear-btn');
+const bgFileInput = document.getElementById('bg-file-input');
+const bgPreview = document.getElementById('bg-preview');
+const bgOpacity = document.getElementById('bg-opacity');
+const bgOpacityVal = document.getElementById('bg-opacity-val');
+
+const MAX_BG_BYTES = 3 * 1024 * 1024;
+
+function applyTheme(themeId) {
+  const theme = THEME_PRESETS[themeId] || THEME_PRESETS.upwork;
+  const root = document.documentElement;
+  for (const [key, value] of Object.entries(theme.vars)) {
+    root.style.setProperty(key, value);
+  }
+  document.querySelectorAll('.theme-btn').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.themeId === theme.id);
+  });
+  if (settingsSummary) {
+    settingsSummary.textContent = `${theme.emoji} ${theme.name}`;
+  }
+}
+
+function applyBackground(appearance) {
+  const opacity = (appearance.backgroundOpacity ?? 25) / 100;
+  document.documentElement.style.setProperty('--bg-image-opacity', String(opacity));
+
+  if (appearance.backgroundImage) {
+    const url = `url(${JSON.stringify(appearance.backgroundImage)})`;
+    bgLayer.style.backgroundImage = url;
+    bgLayer.classList.add('has-image');
+    bgPreview.style.backgroundImage = url;
+    bgPreview.classList.add('visible');
+  } else {
+    bgLayer.style.backgroundImage = '';
+    bgLayer.classList.remove('has-image');
+    bgPreview.style.backgroundImage = '';
+    bgPreview.classList.remove('visible');
+  }
+
+  if (bgOpacity) bgOpacity.value = Math.round(appearance.backgroundOpacity ?? 25);
+  if (bgOpacityVal) bgOpacityVal.textContent = `${Math.round(appearance.backgroundOpacity ?? 25)}%`;
+}
+
+async function loadAppearance() {
+  const { appearance } = await chrome.storage.local.get('appearance');
+  return { ...DEFAULT_APPEARANCE, ...appearance };
+}
+
+async function saveAppearance(appearance) {
+  await chrome.storage.local.set({ appearance });
+}
+
+function buildThemeGrid() {
+  themeGrid.innerHTML = '';
+  for (const theme of Object.values(THEME_PRESETS)) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'theme-btn';
+    btn.dataset.themeId = theme.id;
+    btn.title = theme.name;
+    btn.innerHTML = `<span class="emoji">${theme.emoji}</span><span>${theme.name}</span>`;
+    btn.addEventListener('click', async () => {
+      const appearance = await loadAppearance();
+      appearance.themeId = theme.id;
+      applyTheme(theme.id);
+      await saveAppearance(appearance);
+    });
+    themeGrid.appendChild(btn);
+  }
+}
+
+settingsToggle.addEventListener('click', () => {
+  const open = settingsBody.classList.toggle('open');
+  settingsToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+});
+
+bgPickBtn.addEventListener('click', () => bgFileInput.click());
+
+bgFileInput.addEventListener('change', async () => {
+  const file = bgFileInput.files?.[0];
+  if (!file) return;
+  if (!file.type.startsWith('image/')) {
+    setStatus('Please choose an image file (PNG, JPG, WebP, GIF).', 'error');
+    return;
+  }
+  if (file.size > MAX_BG_BYTES) {
+    setStatus('Image too large. Use a file under 3 MB.', 'error');
+    bgFileInput.value = '';
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const appearance = await loadAppearance();
+    appearance.backgroundImage = reader.result;
+    applyBackground(appearance);
+    await saveAppearance(appearance);
+    setStatus('Background image applied.', 'success');
+  };
+  reader.onerror = () => setStatus('Could not read that image.', 'error');
+  reader.readAsDataURL(file);
+  bgFileInput.value = '';
+});
+
+bgClearBtn.addEventListener('click', async () => {
+  const appearance = await loadAppearance();
+  appearance.backgroundImage = null;
+  applyBackground(appearance);
+  await saveAppearance(appearance);
+  setStatus('Background removed.', 'info');
+});
+
+bgOpacity.addEventListener('input', async () => {
+  const val = parseInt(bgOpacity.value, 10);
+  bgOpacityVal.textContent = `${val}%`;
+  const appearance = await loadAppearance();
+  appearance.backgroundOpacity = val;
+  applyBackground(appearance);
+  await saveAppearance(appearance);
+});
+
+async function initAppearance() {
+  buildThemeGrid();
+  const appearance = await loadAppearance();
+  applyTheme(appearance.themeId || 'upwork');
+  applyBackground(appearance);
+}
+
+initAppearance();
 renderJobs();
