@@ -29,11 +29,16 @@ async function syncAlarmsFromStorage() {
 }
 
 async function extractFromTab(tabId) {
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: extractionScript
-  });
-  return result?.result || null;
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: extractionScript
+    });
+    return result?.result || null;
+  } catch (err) {
+    console.warn(`[Upwork Tracker] executeScript failed on tab ${tabId}:`, err);
+    return null;
+  }
 }
 
 /** Pick the best result across retries (prefer specific times like "17 hours ago" over "yesterday"). */
@@ -42,11 +47,21 @@ function scoreExtractionResult(data) {
   let score = lastViewedSpecificityScore(data.lastViewed);
   if (data.lastViewedSource?.startsWith('activity')) score += 50;
   if (data.lastViewedSource === 'data-test') score += 40;
+  if (data.lastViewedSource === 'activity-dt-dd') score += 55;
   return score;
 }
 
-/** Retry extraction — Upwork SPA often renders stats after 'complete'. */
-async function extractFromTabWithRetry(tabId, maxAttempts = 6, delayMs = 1200) {
+function isTrustworthyLastViewedSource(source) {
+  if (!source) return false;
+  return (
+    source.startsWith('activity') ||
+    source === 'data-test' ||
+    source === 'activity-dt-dd'
+  );
+}
+
+/** Retry extraction — in-page wait handles SPA; background retries catch late renders. */
+async function extractFromTabWithRetry(tabId, maxAttempts = 4, delayMs = 2000) {
   let bestData = null;
   let bestScore = -1;
 
@@ -62,16 +77,51 @@ async function extractFromTabWithRetry(tabId, maxAttempts = 6, delayMs = 1200) {
       bestData = data;
     }
     if (score >= 150) return data;
+    if (score >= 145 && isTrustworthyLastViewedSource(data.lastViewedSource)) return data;
   }
   return bestData;
 }
 
-function notifyClientViewed(job, lastViewedDisplay) {
+const pendingExtractRetries = new Map();
+
+function scheduleExtractRetry(tabId, jobId) {
+  const key = `${jobId}:${tabId}`;
+  if (pendingExtractRetries.has(key)) return;
+
+  pendingExtractRetries.set(key, true);
+  (async () => {
+    try {
+      for (let i = 1; i <= 3; i++) {
+        await sleep(i * 2500);
+        const { jobs } = await chrome.storage.local.get('jobs');
+        const job = jobs?.find((j) => j.id === jobId && j.tabId === tabId);
+        if (!job) break;
+
+        const newData = await extractFromTabWithRetry(tabId, 2, 1500);
+        if (
+          newData &&
+          (newData.lastViewedAbsent || isValidLastViewedDisplay(newData.lastViewed))
+        ) {
+          await applyExtractedData(tabId, jobId, newData, { fromRetry: true });
+          break;
+        }
+      }
+    } finally {
+      pendingExtractRetries.delete(key);
+    }
+  })();
+}
+
+function notifyClientViewed(job, lastViewedDisplay, reason) {
+  const isFirst = reason === 'first-view';
   chrome.notifications.create(`view-${job.id}-${Date.now()}`, {
     type: 'basic',
     iconUrl: 'icons/icon48.png',
-    title: 'Upwork Job Alert — Client viewed',
-    message: `"${job.title}": Last viewed by client is now ${lastViewedDisplay}.`
+    priority: 2,
+    title: isFirst ? 'Upwork — Client viewed (first time)' : 'Upwork — Client viewed again',
+    message: isFirst
+      ? `"${job.title}": Client viewed for the first time — ${lastViewedDisplay}.`
+      : `"${job.title}": Last viewed by client is now ${lastViewedDisplay}.`
   });
 }
 
@@ -106,14 +156,180 @@ function recordComparison(job, entry) {
   };
 }
 
-function appendChangeHistory(job, from, to, notified) {
+function recordMeaningfulChange(job, from, to, notified) {
   if (!from || !to || normalizeLastViewedText(from) === normalizeLastViewedText(to)) return;
-  if (!job.changeHistory) job.changeHistory = [];
-  job.changeHistory.unshift({ at: Date.now(), from, to, notified: !!notified });
-  job.changeHistory = job.changeHistory.slice(0, 20);
+  const entry = { at: Date.now(), from, to, notified: !!notified };
+  job.lastMeaningfulChange = entry;
+  job.changeHistory = [entry];
 }
 
 // ---------- REFRESH HANDLER ----------
+async function applyExtractedData(tabId, jobId, newData, opts = {}) {
+  const { jobs } = await chrome.storage.local.get('jobs');
+  if (!jobs) return;
+
+  const jobIndex = jobs.findIndex((j) => j.id === jobId && j.tabId === tabId);
+  if (jobIndex === -1) return;
+
+  const job = jobs[jobIndex];
+  updateSecondaryFields(job, newData);
+
+  if (newData.captchaDetected) {
+    console.warn(`[Upwork Tracker] CAPTCHA detected on tab ${tabId} for "${job.title}".`);
+    job.needsVerification = true;
+    job.lastExtractionError = 'CAPTCHA or security verification detected.';
+    recordComparison(job, {
+      previous: job.lastViewed || '(none)',
+      current: '(CAPTCHA / verification)',
+      changed: false,
+      error: true,
+      reason: 'captcha'
+    });
+    const now = Date.now();
+    if (!job.lastCaptchaAlertAt || now - job.lastCaptchaAlertAt > 30 * 60 * 1000) {
+      job.lastCaptchaAlertAt = now;
+      notifyCaptcha(job);
+    }
+    jobs[jobIndex] = job;
+    await chrome.storage.local.set({ jobs });
+    return;
+  }
+
+  job.needsVerification = false;
+
+  const newRaw = newData.lastViewed || '';
+  const oldRaw = job.lastViewed || '';
+
+  if (newData.lastViewedAbsent && !newRaw) {
+    job.awaitingFirstView = true;
+    job.lastViewed = null;
+    job.lastViewedSeconds = null;
+    job.lastExtractionError = null;
+    recordComparison(job, {
+      previous: '(not viewed yet)',
+      current: '(not viewed yet)',
+      changed: false,
+      reason: 'awaiting-first-view',
+      source: newData.lastViewedSource
+    });
+    jobs[jobIndex] = job;
+    await chrome.storage.local.set({ jobs });
+    return;
+  }
+
+  if (!isValidLastViewedDisplay(newRaw)) {
+    console.warn(
+      `[Upwork Tracker] Invalid last viewed on tab ${tabId} (source: ${newData.lastViewedSource}, raw: "${newRaw}").`
+    );
+    job.lastExtractionError =
+      'Could not read "Last viewed by client" from page. Retrying without reload…';
+    recordComparison(job, {
+      previous: oldRaw,
+      current: '(read failed)',
+      changed: false,
+      error: true,
+      source: newData.lastViewedSource
+    });
+    jobs[jobIndex] = job;
+    await chrome.storage.local.set({ jobs });
+    if (!opts.fromRetry) scheduleExtractRetry(tabId, jobId);
+    return;
+  }
+
+  job.lastExtractionError = null;
+
+  const newSeconds = parseRelativeSeconds(newRaw);
+  const oldSeconds = getJobLastViewedSeconds(job);
+
+  console.log(`[Upwork Tracker] Tab ${tabId} extract (source: ${newData.lastViewedSource}).`);
+  console.log(`  Stored: "${oldRaw}" (${oldSeconds}s) -> Page: "${newRaw}" (${newSeconds}s)`);
+
+  if (
+    oldSeconds != null &&
+    newSeconds != null &&
+    newSeconds < oldSeconds &&
+    oldSeconds - newSeconds >= 120 &&
+    !isTrustworthyLastViewedSource(newData.lastViewedSource)
+  ) {
+    console.warn(
+      `[Upwork Tracker] Rejected untrusted "more recent" read "${newRaw}" (keeping "${oldRaw}").`
+    );
+    job.lastExtractionError = `Kept "${oldRaw}" — unreliable read "${newRaw}". Will retry.`;
+    recordComparison(job, {
+      previous: oldRaw,
+      current: newRaw,
+      changed: false,
+      skipped: true,
+      reason: 'untrusted-read',
+      source: newData.lastViewedSource
+    });
+    jobs[jobIndex] = job;
+    await chrome.storage.local.set({ jobs });
+    if (!opts.fromRetry) scheduleExtractRetry(tabId, jobId);
+    return;
+  }
+
+  if (isLikelyExtractionRegression(oldRaw, newRaw, oldSeconds, newSeconds)) {
+    console.warn(
+      `[Upwork Tracker] Rejected ambiguous read "${newRaw}" (keeping "${oldRaw}").`
+    );
+    job.lastExtractionError = `Kept "${oldRaw}" — page read "${newRaw}" looked incorrect. Will retry.`;
+    recordComparison(job, {
+      previous: oldRaw,
+      current: newRaw,
+      changed: false,
+      skipped: true,
+      reason: 'rejected-read',
+      source: newData.lastViewedSource
+    });
+    jobs[jobIndex] = job;
+    await chrome.storage.local.set({ jobs });
+    if (!opts.fromRetry) scheduleExtractRetry(tabId, jobId);
+    return;
+  }
+
+  const hadNoBaseline = oldSeconds == null;
+  const { notify, reason } = shouldNotifyClientViewed(oldSeconds, newSeconds, oldRaw, newRaw, {
+    awaitingFirstView: job.awaitingFirstView,
+    hadNoBaseline
+  });
+  const rawChanged = normalizeLastViewedText(oldRaw) !== normalizeLastViewedText(newRaw);
+  const meaningful = isMeaningfulLastViewedChange(oldSeconds, newSeconds, notify);
+
+  recordComparison(job, {
+    previous: meaningful ? oldRaw || '(not viewed yet)' : newRaw,
+    current: newRaw,
+    changed: meaningful,
+    notified: notify && meaningful,
+    reason: meaningful ? reason : rawChanged ? 'synced' : 'unchanged',
+    source: newData.lastViewedSource
+  });
+
+  if (newSeconds != null && (rawChanged || !oldRaw || job.awaitingFirstView)) {
+    if (meaningful) {
+      job.previousLastViewed = oldRaw || null;
+      job.previousLastViewedSeconds = oldSeconds;
+      recordMeaningfulChange(job, oldRaw || '(not viewed yet)', newRaw, notify);
+      job.lastChangeTime = Date.now();
+    }
+    job.awaitingFirstView = false;
+    job.lastViewed = newRaw;
+    job.lastViewedSeconds = newSeconds;
+    job.lastViewedMinutes = Math.floor(newSeconds / 60);
+    job.lastViewedSource = newData.lastViewedSource || job.lastViewedSource;
+  }
+
+  jobs[jobIndex] = job;
+  await chrome.storage.local.set({ jobs });
+
+  if (notify) {
+    console.log(`  -> NOTIFY (${reason}): ${oldSeconds}s -> ${newSeconds}s`);
+    notifyClientViewed(job, newRaw, reason);
+  } else {
+    console.log(`  -> No notify (${reason}).`);
+  }
+}
+
 async function processRefreshedTab(tabId, tabUrl) {
   const { jobs } = await chrome.storage.local.get('jobs');
   if (!jobs) return;
@@ -132,124 +348,36 @@ async function processRefreshedTab(tabId, tabUrl) {
   }
 
   try {
+    await sleep(500);
     const newData = await extractFromTabWithRetry(tabId);
     if (!newData) {
-      job.lastExtractionError = 'No data returned from page.';
+      job.lastExtractionError = 'No data returned from page. Retrying…';
       jobs[jobIndex] = job;
       await chrome.storage.local.set({ jobs });
+      scheduleExtractRetry(tabId, job.id);
       return;
     }
 
-    updateSecondaryFields(job, newData);
-
-    // --- CAPTCHA / bot check ---
-    if (newData.captchaDetected) {
-      console.warn(`[Upwork Tracker] CAPTCHA detected on tab ${tabId} for "${job.title}".`);
-      job.needsVerification = true;
-      job.lastExtractionError = 'CAPTCHA or security verification detected.';
-      recordComparison(job, {
-        previous: job.lastViewed || '(none)',
-        current: '(CAPTCHA / verification)',
-        changed: false,
-        error: true,
-        reason: 'captcha'
-      });
-      const now = Date.now();
-      if (!job.lastCaptchaAlertAt || now - job.lastCaptchaAlertAt > 30 * 60 * 1000) {
-        job.lastCaptchaAlertAt = now;
-        notifyCaptcha(job);
-      }
-      jobs[jobIndex] = job;
-      await chrome.storage.local.set({ jobs });
+    if (newData.lastViewedAbsent && !newData.lastViewed) {
+      await applyExtractedData(tabId, job.id, newData);
       return;
     }
 
-    job.needsVerification = false;
-    job.lastExtractionError = null;
-
-    const newRaw = newData.lastViewed || '';
-    const oldRaw = job.lastViewed || '';
-
-    if (!isValidLastViewedDisplay(newRaw)) {
-      console.warn(
-        `[Upwork Tracker] Could not read valid "Last viewed by client" on tab ${tabId} (source: ${newData.lastViewedSource}). Keeping previous value: "${oldRaw}".`
-      );
-      job.lastExtractionError = 'Could not read "Last viewed by client" from page. Tab left unchanged.';
-      recordComparison(job, {
-        previous: oldRaw,
-        current: '(read failed)',
-        changed: false,
-        error: true,
-        source: newData.lastViewedSource
-      });
+    if (!isValidLastViewedDisplay(newData.lastViewed)) {
+      job.lastExtractionError = 'Could not read "Last viewed by client" (page not ready). Retrying…';
       jobs[jobIndex] = job;
       await chrome.storage.local.set({ jobs });
+      scheduleExtractRetry(tabId, job.id);
       return;
     }
 
-    const newMinutes = parseRelativeMinutes(newRaw);
-    const oldMinutes = job.lastViewedMinutes;
-
-    console.log(`[Upwork Tracker] Tab ${tabId} refreshed (source: ${newData.lastViewedSource}).`);
-    console.log(`  Stored: "${oldRaw}" (${oldMinutes} min) -> Page: "${newRaw}" (${newMinutes} min)`);
-
-    if (isLikelyExtractionRegression(oldRaw, newRaw, oldMinutes, newMinutes)) {
-      console.warn(
-        `[Upwork Tracker] Rejected ambiguous read "${newRaw}" (keeping "${oldRaw}"). Page likely still shows a more specific time.`
-      );
-      job.lastExtractionError = `Kept "${oldRaw}" — page read "${newRaw}" looked incorrect. Will retry next refresh.`;
-      recordComparison(job, {
-        previous: oldRaw,
-        current: newRaw,
-        changed: false,
-        skipped: true,
-        reason: 'rejected-read',
-        source: newData.lastViewedSource
-      });
-      jobs[jobIndex] = job;
-      await chrome.storage.local.set({ jobs });
-      return;
-    }
-
-    const { notify, reason } = shouldNotifyClientViewed(oldMinutes, newMinutes, oldRaw, newRaw);
-
-    const rawChanged = normalizeLastViewedText(oldRaw) !== normalizeLastViewedText(newRaw);
-
-    recordComparison(job, {
-      previous: oldRaw || '(none)',
-      current: newRaw,
-      changed: rawChanged,
-      notified: notify,
-      reason: rawChanged ? reason : 'unchanged',
-      source: newData.lastViewedSource
-    });
-
-    if (rawChanged && newMinutes != null) {
-      job.previousLastViewed = oldRaw || null;
-      job.previousLastViewedMinutes = oldMinutes;
-      job.lastViewed = newRaw;
-      job.lastViewedMinutes = newMinutes;
-      job.lastChangeTime = Date.now();
-      appendChangeHistory(job, oldRaw, newRaw, notify);
-    } else if (!oldRaw && newMinutes != null) {
-      job.lastViewed = newRaw;
-      job.lastViewedMinutes = newMinutes;
-    }
-
-    jobs[jobIndex] = job;
-    await chrome.storage.local.set({ jobs });
-
-    if (notify) {
-      console.log(`  -> NOTIFY (${reason}): ${oldMinutes} -> ${newMinutes} min`);
-      notifyClientViewed(job, newRaw);
-    } else {
-      console.log(`  -> No notify (${reason}).`);
-    }
+    await applyExtractedData(tabId, job.id, newData);
   } catch (err) {
     console.error(`[Upwork Tracker] Error processing refreshed tab ${tabId}:`, err);
     job.lastExtractionError = err.message || 'Extraction failed';
     jobs[jobIndex] = job;
     await chrome.storage.local.set({ jobs });
+    scheduleExtractRetry(tabId, job.id);
   }
 }
 
@@ -289,7 +417,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     job.pendingRefresh = true;
     await chrome.storage.local.set({ jobs });
     console.log(`[Upwork Tracker] Refreshing tab ${job.tabId} for job "${job.title}"`);
-    await chrome.tabs.reload(job.tabId);
+    await chrome.tabs.reload(job.tabId, { bypassCache: true });
   } catch {
     console.warn(`[Upwork Tracker] Tab ${job.tabId} no longer exists, removing job.`);
     const newJobs = jobs.filter((j) => j.id !== jobId);
@@ -316,7 +444,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           lastViewedSource
         } = msg.data;
 
-        if (!isValidLastViewedDisplay(lastViewed)) {
+        const lastViewedAbsent = !!msg.data.lastViewedAbsent;
+        const hasTime = isValidLastViewedDisplay(lastViewed);
+
+        if (!lastViewedAbsent && !hasTime) {
           sendResponse({
             success: false,
             error:
@@ -333,7 +464,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
 
         const id = Date.now().toString();
-        const lastViewedMinutes = parseRelativeMinutes(lastViewed);
+        const lastViewedSeconds = hasTime ? parseRelativeSeconds(lastViewed) : null;
         const interval = Math.max(1, checkInterval || 5);
 
         const newJob = {
@@ -342,9 +473,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           tabId,
           title,
           proposals,
-          lastViewed,
-          lastViewedMinutes,
+          lastViewed: hasTime ? lastViewed : null,
+          lastViewedSeconds,
+          lastViewedMinutes: lastViewedSeconds != null ? Math.floor(lastViewedSeconds / 60) : null,
           lastViewedSource: lastViewedSource || 'manual-add',
+          awaitingFirstView: lastViewedAbsent || !hasTime,
           interviewing,
           invitesSent,
           unansweredInvites,
@@ -354,26 +487,27 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           lastExtractionError: null,
           lastCaptchaAlertAt: null,
           previousLastViewed: null,
-          previousLastViewedMinutes: null,
+          previousLastViewedSeconds: null,
           lastChangeTime: null,
           lastComparison: {
             at: Date.now(),
             previous: '(added)',
-            current: lastViewed,
+            current: hasTime ? lastViewed : '(waiting for first view)',
             changed: false,
             notified: false,
             source: lastViewedSource || 'manual-add'
           },
-          changeHistory: []
+          changeHistory: [],
+          lastMeaningfulChange: null
         };
 
         const updatedJobs = jobs ? [...jobs, newJob] : [newJob];
         await chrome.storage.local.set({ jobs: updatedJobs });
         chrome.alarms.create(id, { periodInMinutes: interval });
         console.log(
-          `[Upwork Tracker] Job added: "${title}", lastViewed="${lastViewed}" (${lastViewedMinutes}m, ${lastViewedSource})`
+          `[Upwork Tracker] Job added: "${title}", lastViewed="${lastViewed || 'absent'}" (${lastViewedSeconds}s, awaiting=${newJob.awaitingFirstView})`
         );
-        sendResponse({ success: true });
+        sendResponse({ success: true, awaitingFirstView: newJob.awaitingFirstView });
       } else if (msg.action === 'removeJob') {
         const { id } = msg;
         await chrome.alarms.clear(id);

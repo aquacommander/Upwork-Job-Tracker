@@ -8,7 +8,7 @@ const debugToggle = document.getElementById('debug-toggle');
 
 debugToggle.addEventListener('click', () => {
   debugSection.classList.toggle('show');
-  debugToggle.textContent = debugSection.classList.contains('show') ? 'Hide Debug Info' : 'Show Debug Info';
+  debugToggle.textContent = debugSection.classList.contains('show') ? 'Hide debug log' : 'Show debug log';
 });
 
 function logDebug(msg) {
@@ -31,8 +31,8 @@ function scoreExtraction(data) {
 async function extractDataFromTab(tabId) {
   let bestData = null;
   let bestScore = -1;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, 1000));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 2000));
     const [result] = await chrome.scripting.executeScript({
       target: { tabId },
       func: extractionScript
@@ -40,6 +40,7 @@ async function extractDataFromTab(tabId) {
     const data = result?.result || null;
     if (!data) continue;
     if (data.captchaDetected) return data;
+    if (data.lastViewedAbsent) return data;
     const score = scoreExtraction(data);
     if (score > bestScore) {
       bestScore = score;
@@ -50,61 +51,73 @@ async function extractDataFromTab(tabId) {
   return bestData;
 }
 
-function formatTime(minutes) {
-  if (minutes == null) return '(unknown)';
-  if (minutes === 0) return 'just now';
-  if (minutes < 60) return `${minutes} minute${minutes !== 1 ? 's' : ''} ago`;
-  if (minutes < 1440) {
-    const h = Math.floor(minutes / 60);
-    return `${h} hour${h !== 1 ? 's' : ''} ago`;
-  }
-  const d = Math.floor(minutes / 1440);
-  return `${d} day${d !== 1 ? 's' : ''} ago`;
-}
-
 function formatChangeTime(timestamp) {
   if (!timestamp) return '';
   return new Date(timestamp).toLocaleString();
 }
 
-function renderComparisonLogs(job) {
-  let html = '';
+function getStatusPill(job) {
+  if (job.pendingRefresh) return { class: 'refresh', text: 'Refreshing' };
+  if (job.needsVerification) return { class: 'error', text: 'Verify' };
+  if (job.awaitingFirstView) return { class: 'wait', text: 'Awaiting view' };
+  if (job.lastExtractionError) return { class: 'error', text: 'Issue' };
+  return { class: 'live', text: 'Tracking' };
+}
 
-  if (job.lastComparison) {
-    const c = job.lastComparison;
-    const time = formatChangeTime(c.at);
-    let line = '';
-    let cssClass = 'compare-log';
-
-    if (c.error) {
-      line = `<b>Last check:</b> could not read page (kept "${escapeHtml(c.previous)}")`;
-      cssClass += ' compare-error';
-    } else if (c.skipped) {
-      line = `<b>Last check:</b> ${escapeHtml(c.previous)} <span class="compare-arrow">→</span> <span class="compare-skipped">${escapeHtml(c.current)}</span> <span class="compare-note">(ignored bad read)</span>`;
-    } else if (c.changed) {
-      line = `<b>Last check:</b> ${escapeHtml(c.previous)} <span class="compare-arrow">→</span> <span class="compare-new">${escapeHtml(c.current)}</span>`;
-      if (c.notified) line += ' <span class="compare-notify">· notified</span>';
-    } else {
-      line = `<b>Last check:</b> ${escapeHtml(c.previous)} <span class="compare-arrow">→</span> ${escapeHtml(c.current)} <span class="compare-note">(no change)</span>`;
-    }
-
-    html += `<div class="${cssClass}">${line}<br><small>${escapeHtml(time)}${c.source ? ' · ' + escapeHtml(c.source) : ''}</small></div>`;
-  } else if (job.previousLastViewed != null && job.previousLastViewed !== job.lastViewed) {
-    html += `
-      <div class="compare-log">
-        <b>Last change:</b> ${escapeHtml(job.previousLastViewed)} <span class="compare-arrow">→</span> ${escapeHtml(job.lastViewed)}<br>
-        <small>${formatChangeTime(job.lastChangeTime)}</small>
-      </div>
-    `;
+function renderLastViewedBlock(job) {
+  if (job.pendingRefresh) {
+    return `
+      <div class="last-viewed-block">
+        <div class="last-viewed-label">Last viewed by client</div>
+        <div class="last-viewed-value refreshing">Updating from page…</div>
+      </div>`;
   }
 
-  if (job.changeHistory?.length) {
-    html += '<div class="compare-history"><b>Change history:</b>';
-    job.changeHistory.slice(0, 8).forEach((entry) => {
-      const flag = entry.notified ? ' · notified' : '';
-      html += `<div class="history-row">${escapeHtml(entry.from)} <span class="compare-arrow">→</span> ${escapeHtml(entry.to)}<br><small>${formatChangeTime(entry.at)}${flag}</small></div>`;
-    });
-    html += '</div>';
+  if (job.awaitingFirstView || !job.lastViewed) {
+    return `
+      <div class="last-viewed-block">
+        <div class="last-viewed-label">Last viewed by client</div>
+        <div class="last-viewed-value muted">Not viewed yet</div>
+        <div class="last-viewed-meta">You will be alerted the moment Upwork shows a time.</div>
+      </div>`;
+  }
+
+  const secs = getJobLastViewedSeconds(job);
+  const meta = secs != null ? `≈ ${secs.toLocaleString()} seconds ago (internal compare)` : '';
+
+  return `
+    <div class="last-viewed-block">
+      <div class="last-viewed-label">Last viewed by client</div>
+      <div class="last-viewed-value">${escapeHtml(job.lastViewed)}</div>
+      ${meta ? `<div class="last-viewed-meta">${escapeHtml(meta)}</div>` : ''}
+    </div>`;
+  }
+
+function renderChangeAndCheck(job) {
+  let html = '';
+
+  const change = job.lastMeaningfulChange;
+  if (change?.from && change?.to) {
+    const flag = change.notified
+      ? '<span class="change-notified">Alert sent</span>'
+      : '';
+    html += `
+      <div class="change-row">
+        <div class="label">Last client view change</div>
+        <span class="change-from">${escapeHtml(change.from)}</span>
+        <span class="change-arrow">→</span>
+        <span class="change-to">${escapeHtml(change.to)}</span>
+        ${flag}
+        <div class="last-viewed-meta">${escapeHtml(formatChangeTime(change.at))}</div>
+      </div>`;
+  }
+
+  if (job.lastComparison && !job.lastComparison.error) {
+    const c = job.lastComparison;
+    let checkText = `Last sync: ${escapeHtml(c.current)}`;
+    if (c.reason === 'synced') checkText += ' (page time advanced)';
+    if (c.notified) checkText += ' · alert sent';
+    html += `<div class="check-row">${checkText}<br><small>${escapeHtml(formatChangeTime(c.at))}</small></div>`;
   }
 
   return html;
@@ -113,48 +126,52 @@ function renderComparisonLogs(job) {
 async function renderJobs() {
   const { jobs } = await chrome.storage.local.get('jobs');
   jobListEl.innerHTML = '';
+
   if (!jobs?.length) {
-    jobListEl.innerHTML = '<p style="color:#888; text-align:center;">No job postings added yet.</p>';
+    jobListEl.innerHTML = `
+      <div class="empty-state">
+        <div class="icon">📋</div>
+        <p>No jobs tracked yet.<br>Open an Upwork job tab and click <b>Track Current Job Tab</b>.</p>
+      </div>`;
     return;
   }
 
   jobs.forEach((job) => {
-    let lastViewedContent;
-    if (job.pendingRefresh) {
-      lastViewedContent = '<span style="color: #e67e22; font-weight: bold;">REFRESHING...</span>';
-    } else {
-      lastViewedContent = `<span style="color: red; font-weight: bold;">${escapeHtml(job.lastViewed) || 'unknown'}</span>`;
-    }
+    const pill = getStatusPill(job);
+    let cardClass = 'job-card';
+    if (job.pendingRefresh) cardClass += ' refreshing';
+    else if (job.awaitingFirstView) cardClass += ' awaiting-view';
+    else if (job.needsVerification) cardClass += ' needs-verification';
+    else cardClass += ' alert-ready';
 
-    let warningHtml = '';
+    let bannerHtml = '';
     if (job.needsVerification) {
-      warningHtml =
-        '<div class="warning-banner">⚠ CAPTCHA / verification detected. Open the tab, complete it, then remove and re-add this job.</div>';
+      bannerHtml =
+        '<div class="banner warn">Complete CAPTCHA in the job tab, then remove and re-add this job.</div>';
     } else if (job.lastExtractionError) {
-      warningHtml = `<div class="warning-banner">⚠ ${escapeHtml(job.lastExtractionError)}</div>`;
+      bannerHtml = `<div class="banner warn">${escapeHtml(job.lastExtractionError)}</div>`;
     }
-
-    const comparisonLogHtml = renderComparisonLogs(job);
 
     const div = document.createElement('div');
-    div.className = 'job-item' + (job.needsVerification ? ' needs-verification' : '');
+    div.className = cardClass;
     div.innerHTML = `
-      <div class="job-title">${escapeHtml(job.title) || '(no title)'}</div>
-      ${warningHtml}
-      <div class="details">
-        <b>Proposals:</b> ${escapeHtml(job.proposals) || '?'}<br>
-        <b>Interviewing:</b> ${escapeHtml(job.interviewing) || '0'} |
-        <b>Invites:</b> ${escapeHtml(job.invitesSent) || '0'} |
-        <b>Unanswered:</b> ${escapeHtml(job.unansweredInvites) || '0'}
+      <div class="job-card-header">
+        <div class="job-title">${escapeHtml(job.title) || '(no title)'}</div>
+        <span class="status-pill ${pill.class}">${pill.text}</span>
       </div>
-      <div class="details">
-        <b>Last viewed by client:</b> ${lastViewedContent}
+      ${bannerHtml}
+      <div class="stats-row">
+        <span class="stat-chip">Proposals <b>${escapeHtml(job.proposals) || '?'}</b></span>
+        <span class="stat-chip">Interviewing <b>${escapeHtml(job.interviewing) || '0'}</b></span>
+        <span class="stat-chip">Invites <b>${escapeHtml(job.invitesSent) || '0'}</b></span>
       </div>
-      ${comparisonLogHtml}
-      <div class="interval-row">
-        <label>Check every (min):</label>
-        <input type="number" class="interval-input" value="${job.checkInterval}" min="1" data-id="${job.id}">
-        <button class="remove-btn" data-id="${job.id}">Remove</button>
+      ${renderLastViewedBlock(job)}
+      ${renderChangeAndCheck(job)}
+      <div class="card-footer">
+        <label for="interval-${job.id}">Check every</label>
+        <input type="number" id="interval-${job.id}" class="interval-input" value="${job.checkInterval}" min="1" data-id="${job.id}">
+        <label>min</label>
+        <button type="button" class="btn-remove" data-id="${job.id}">Remove</button>
       </div>
     `;
     jobListEl.appendChild(div);
@@ -171,14 +188,14 @@ async function renderJobs() {
           checkInterval: newInterval
         });
         if (!response?.success) {
-          setStatus('❌ ' + (response?.error || 'Failed to update interval'), 'error');
+          setStatus('Failed to update interval', 'error');
         }
         await renderJobs();
       }
     });
   });
 
-  document.querySelectorAll('.remove-btn').forEach((btn) => {
+  document.querySelectorAll('.btn-remove').forEach((btn) => {
     btn.addEventListener('click', async (e) => {
       const id = e.target.dataset.id;
       await chrome.runtime.sendMessage({ action: 'removeJob', id });
@@ -195,58 +212,50 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
 function escapeHtml(text) {
   const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-  return String(text).replace(/[&<>"']/g, (m) => map[m]);
+  return String(text ?? '').replace(/[&<>"']/g, (m) => map[m]);
 }
 
 function setStatus(msg, type) {
   statusEl.textContent = msg;
-  statusEl.className = 'status-' + type;
+  statusEl.className = 'visible status-' + type;
 }
 
 addBtn.addEventListener('click', async () => {
-  setStatus('Adding current tab...', 'info');
+  setStatus('Reading job page…', 'info');
   debugSection.innerHTML = '';
-  logDebug('Starting add process...');
+  logDebug('Add job started');
 
   try {
     const tab = await getActiveUpworkTab();
-    logDebug(`Active tab ID: ${tab?.id}, URL: ${tab?.url}`);
-
     if (!tab?.id) {
-      throw new Error('No active tab found. Open an Upwork job page in this window first.');
+      throw new Error('No active tab. Open an Upwork job page first.');
     }
-
     if (!isUpworkJobUrl(tab.url)) {
-      throw new Error(
-        'This tab is not an Upwork job page. Open a job from upwork.com (URL should contain /jobs/ or /freelance-jobs/).'
-      );
+      throw new Error('Not an Upwork job URL (/jobs/ or /freelance-jobs/).');
     }
 
-    logDebug('Reading page (may retry while SPA loads)...');
     const data = await extractDataFromTab(tab.id);
-
     if (!data) {
-      throw new Error('Could not read the page. Wait for it to finish loading, then try again.');
+      throw new Error('Could not read the page. Wait for it to load and try again.');
     }
-
     if (data.captchaDetected) {
+      throw new Error('Complete CAPTCHA in the tab, then try again.');
+    }
+
+    const hasTime = data.lastViewed && isValidLastViewedDisplay(data.lastViewed);
+    const absent = data.lastViewedAbsent && !hasTime;
+
+    logDebug(`Last viewed: "${data.lastViewed || '(none)'}" absent=${!!absent}`);
+    if (hasTime) {
+      logDebug(`Seconds: ${parseRelativeSeconds(data.lastViewed)} · ${JSON.stringify(classifyLastViewedUnit(data.lastViewed))}`);
+    }
+
+    if (!hasTime && !absent) {
       throw new Error(
-        'CAPTCHA or security verification is showing. Complete it in the tab, then add the job again.'
+        'Could not find Activity / Last viewed on this page. Scroll to the Activity section.'
       );
     }
 
-    logDebug(`Title: "${data.title}"`);
-    logDebug(`Proposals: "${data.proposals}"`);
-    logDebug(`Last viewed: "${data.lastViewed}" (source: ${data.lastViewedSource}, candidates: ${data.lastViewedCandidates || '?'})`);
-    logDebug(`Parsed minutes: ${parseRelativeMinutes(data.lastViewed)}, specificity: ${lastViewedSpecificityScore(data.lastViewed)}`);
-
-    if (!isValidLastViewedDisplay(data.lastViewed)) {
-      throw new Error(
-        'Could not find "Last viewed by client" on this page. Scroll to the Activity / Proposals block and try again.'
-      );
-    }
-
-    logDebug('Sending to background...');
     const response = await chrome.runtime.sendMessage({
       action: 'addJob',
       data: {
@@ -254,7 +263,8 @@ addBtn.addEventListener('click', async () => {
         tabId: tab.id,
         title: data.title,
         proposals: data.proposals,
-        lastViewed: data.lastViewed,
+        lastViewed: data.lastViewed || '',
+        lastViewedAbsent: absent,
         lastViewedSource: data.lastViewedSource,
         interviewing: data.interviewing,
         invitesSent: data.invitesSent,
@@ -263,20 +273,19 @@ addBtn.addEventListener('click', async () => {
       }
     });
 
-    logDebug(`Background response: ${JSON.stringify(response)}`);
+    if (!response?.success) {
+      throw new Error(response?.error || 'Failed to add job');
+    }
 
-    if (!response) {
-      throw new Error('No response from extension background. Reload the extension at chrome://extensions.');
-    }
-    if (response.success) {
-      setStatus(`Job added. Last viewed: ${data.lastViewed}`, 'success');
-      await renderJobs();
+    if (response.awaitingFirstView) {
+      setStatus('Job tracked. Waiting for client’s first view — you’ll be alerted immediately.', 'success');
     } else {
-      setStatus('❌ ' + (response.error || 'Failed to add job'), 'error');
+      setStatus(`Tracking started. Last viewed: ${data.lastViewed}`, 'success');
     }
+    await renderJobs();
   } catch (err) {
     logDebug(`ERROR: ${err.message}`);
-    setStatus('❌ ' + err.message, 'error');
+    setStatus(err.message, 'error');
   }
 });
 
