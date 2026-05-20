@@ -69,7 +69,7 @@ function renderLastViewedBlock(job) {
     return `
       <div class="last-viewed-block">
         <div class="last-viewed-label">Last viewed by client</div>
-        <div class="last-viewed-value refreshing">Updating from page…</div>
+        <div class="last-viewed-value refreshing">Reloading job tab…</div>
       </div>`;
   }
 
