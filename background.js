@@ -61,7 +61,7 @@ function isTrustworthyLastViewedSource(source) {
 }
 
 /** Retry extraction — in-page wait handles SPA; background retries catch late renders. */
-async function extractFromTabWithRetry(tabId, maxAttempts = 4, delayMs = 2000) {
+async function extractFromTabWithRetry(tabId, maxAttempts = 3, delayMs = 800) {
   let bestData = null;
   let bestScore = -1;
 
@@ -71,18 +71,102 @@ async function extractFromTabWithRetry(tabId, maxAttempts = 4, delayMs = 2000) {
     if (!data) continue;
     if (data.captchaDetected) return data;
 
+    const hasValid =
+      data.lastViewedAbsent || (data.lastViewed && isValidLastViewedDisplay(data.lastViewed));
     const score = scoreExtractionResult(data);
-    if (score > bestScore) {
+
+    if (hasValid && score > bestScore) {
       bestScore = score;
       bestData = data;
     }
     if (score >= 150) return data;
     if (score >= 145 && isTrustworthyLastViewedSource(data.lastViewedSource)) return data;
+    if (hasValid && isTrustworthyLastViewedSource(data.lastViewedSource)) return data;
+  }
+
+  if (
+    bestData &&
+    (bestData.lastViewedAbsent ||
+      (bestData.lastViewed && isValidLastViewedDisplay(bestData.lastViewed)))
+  ) {
+    return bestData;
   }
   return bestData;
 }
 
+async function finishJobCheck(tabId, jobId, newData) {
+  refreshByTab.delete(tabId);
+  const { jobs } = await chrome.storage.local.get('jobs');
+  if (jobs) {
+    const idx = jobs.findIndex((j) => j.id === jobId && j.tabId === tabId);
+    if (idx !== -1) {
+      jobs[idx].pendingRefresh = false;
+      await chrome.storage.local.set({ jobs });
+    }
+  }
+  await applyExtractedData(tabId, jobId, newData);
+}
+
+/**
+ * Every scheduled check: reload the tracked Upwork job TAB in Chrome,
+ * then read/compare/notify in processRefreshedTab when load completes.
+ */
+async function runScheduledCheck(job) {
+  const { jobs } = await chrome.storage.local.get('jobs');
+  const jobIndex = jobs?.findIndex((j) => j.id === job.id);
+  if (jobIndex === -1) return;
+
+  const j = jobs[jobIndex];
+  j.pendingRefresh = true;
+  refreshByTab.set(j.tabId, j.id);
+  await chrome.storage.local.set({ jobs });
+  scheduleRefreshWatchdog(j.tabId, j.id);
+
+  console.log(`[Upwork Tracker] Reloading job tab ${j.tabId} for "${j.title}"`);
+
+  try {
+    await chrome.tabs.get(j.tabId);
+    await chrome.tabs.reload(j.tabId, { bypassCache: true });
+  } catch (err) {
+    console.warn(`[Upwork Tracker] Cannot reload tab ${j.tabId}:`, err);
+    refreshByTab.delete(j.tabId);
+    const { jobs: jobs2 } = await chrome.storage.local.get('jobs');
+    const idx = jobs2?.findIndex((x) => x.id === job.id);
+    if (idx !== -1 && jobs2) {
+      jobs2[idx].pendingRefresh = false;
+      jobs2[idx].lastExtractionError =
+        'Job tab not found. Keep the Upwork job page open or pinned in this browser.';
+      await chrome.storage.local.set({ jobs: jobs2 });
+    }
+  }
+}
+
 const pendingExtractRetries = new Map();
+/** tabId -> jobId — survives storage race before reload completes */
+const refreshByTab = new Map();
+
+function clearRefreshState(jobs, jobIndex, tabId) {
+  if (jobIndex >= 0 && jobs[jobIndex]) {
+    jobs[jobIndex].pendingRefresh = false;
+  }
+  if (tabId != null) refreshByTab.delete(tabId);
+}
+
+function scheduleRefreshWatchdog(tabId, jobId) {
+  const key = `${jobId}:${tabId}`;
+  setTimeout(async () => {
+    if (!refreshByTab.has(tabId)) return;
+    console.warn(`[Upwork Tracker] Watchdog: refresh timed out for tab ${tabId}`);
+    refreshByTab.delete(tabId);
+    const { jobs } = await chrome.storage.local.get('jobs');
+    if (!jobs) return;
+    const idx = jobs.findIndex((j) => j.id === jobId && j.tabId === tabId);
+    if (idx === -1) return;
+    jobs[idx].pendingRefresh = false;
+    jobs[idx].lastExtractionError = 'Refresh timed out. Will retry on next check.';
+    await chrome.storage.local.set({ jobs });
+  }, 45000);
+}
 
 function scheduleExtractRetry(tabId, jobId) {
   const key = `${jobId}:${tabId}`;
@@ -91,21 +175,17 @@ function scheduleExtractRetry(tabId, jobId) {
   pendingExtractRetries.set(key, true);
   (async () => {
     try {
-      for (let i = 1; i <= 3; i++) {
-        await sleep(i * 2500);
-        const { jobs } = await chrome.storage.local.get('jobs');
-        const job = jobs?.find((j) => j.id === jobId && j.tabId === tabId);
-        if (!job) break;
+      const { jobs } = await chrome.storage.local.get('jobs');
+      const job = jobs?.find((j) => j.id === jobId && j.tabId === tabId);
+      if (!job) return;
 
-        const newData = await extractFromTabWithRetry(tabId, 2, 1500);
-        if (
-          newData &&
-          (newData.lastViewedAbsent || isValidLastViewedDisplay(newData.lastViewed))
-        ) {
-          await applyExtractedData(tabId, jobId, newData, { fromRetry: true });
-          break;
-        }
-      }
+      job.pendingRefresh = true;
+      refreshByTab.set(tabId, jobId);
+      await chrome.storage.local.set({ jobs });
+      console.log(`[Upwork Tracker] Retry reload tab ${tabId} for job ${jobId}`);
+      await chrome.tabs.reload(tabId, { bypassCache: true });
+    } catch (err) {
+      console.warn(`[Upwork Tracker] Retry reload failed:`, err);
     } finally {
       pendingExtractRetries.delete(key);
     }
@@ -190,12 +270,16 @@ async function applyExtractedData(tabId, jobId, newData, opts = {}) {
       job.lastCaptchaAlertAt = now;
       notifyCaptcha(job);
     }
+    job.pendingRefresh = false;
+    refreshByTab.delete(tabId);
     jobs[jobIndex] = job;
     await chrome.storage.local.set({ jobs });
     return;
   }
 
   job.needsVerification = false;
+  job.pendingRefresh = false;
+  refreshByTab.delete(tabId);
 
   const newRaw = newData.lastViewed || '';
   const oldRaw = job.lastViewed || '';
@@ -212,6 +296,8 @@ async function applyExtractedData(tabId, jobId, newData, opts = {}) {
       reason: 'awaiting-first-view',
       source: newData.lastViewedSource
     });
+    job.pendingRefresh = false;
+    refreshByTab.delete(tabId);
     jobs[jobIndex] = job;
     await chrome.storage.local.set({ jobs });
     return;
@@ -230,6 +316,8 @@ async function applyExtractedData(tabId, jobId, newData, opts = {}) {
       error: true,
       source: newData.lastViewedSource
     });
+    job.pendingRefresh = false;
+    refreshByTab.delete(tabId);
     jobs[jobIndex] = job;
     await chrome.storage.local.set({ jobs });
     if (!opts.fromRetry) scheduleExtractRetry(tabId, jobId);
@@ -263,6 +351,8 @@ async function applyExtractedData(tabId, jobId, newData, opts = {}) {
       reason: 'untrusted-read',
       source: newData.lastViewedSource
     });
+    job.pendingRefresh = false;
+    refreshByTab.delete(tabId);
     jobs[jobIndex] = job;
     await chrome.storage.local.set({ jobs });
     if (!opts.fromRetry) scheduleExtractRetry(tabId, jobId);
@@ -282,6 +372,8 @@ async function applyExtractedData(tabId, jobId, newData, opts = {}) {
       reason: 'rejected-read',
       source: newData.lastViewedSource
     });
+    job.pendingRefresh = false;
+    refreshByTab.delete(tabId);
     jobs[jobIndex] = job;
     await chrome.storage.local.set({ jobs });
     if (!opts.fromRetry) scheduleExtractRetry(tabId, jobId);
@@ -297,15 +389,16 @@ async function applyExtractedData(tabId, jobId, newData, opts = {}) {
   const meaningful = isMeaningfulLastViewedChange(oldSeconds, newSeconds, notify);
 
   recordComparison(job, {
-    previous: meaningful ? oldRaw || '(not viewed yet)' : newRaw,
+    previous: oldRaw || '(not viewed yet)',
     current: newRaw,
     changed: meaningful,
     notified: notify && meaningful,
-    reason: meaningful ? reason : rawChanged ? 'synced' : 'unchanged',
+    reason: notify ? reason : rawChanged ? 'synced' : 'unchanged',
     source: newData.lastViewedSource
   });
 
-  if (newSeconds != null && (rawChanged || !oldRaw || job.awaitingFirstView)) {
+  // After each tab refresh: always mirror the latest page data in the extension UI.
+  if (newSeconds != null) {
     if (meaningful) {
       job.previousLastViewed = oldRaw || null;
       job.previousLastViewedSeconds = oldSeconds;
@@ -317,6 +410,7 @@ async function applyExtractedData(tabId, jobId, newData, opts = {}) {
     job.lastViewedSeconds = newSeconds;
     job.lastViewedMinutes = Math.floor(newSeconds / 60);
     job.lastViewedSource = newData.lastViewedSource || job.lastViewedSource;
+    job.lastSyncedAt = Date.now();
   }
 
   jobs[jobIndex] = job;
@@ -331,26 +425,35 @@ async function applyExtractedData(tabId, jobId, newData, opts = {}) {
 }
 
 async function processRefreshedTab(tabId, tabUrl) {
+  const pendingJobId = refreshByTab.get(tabId);
   const { jobs } = await chrome.storage.local.get('jobs');
   if (!jobs) return;
 
-  const jobIndex = jobs.findIndex((j) => j.tabId === tabId && j.pendingRefresh);
+  let jobIndex = -1;
+  if (pendingJobId) {
+    jobIndex = jobs.findIndex((j) => j.id === pendingJobId && j.tabId === tabId);
+  }
+  if (jobIndex === -1) {
+    jobIndex = jobs.findIndex((j) => j.tabId === tabId && j.pendingRefresh);
+  }
   if (jobIndex === -1) return;
 
   const job = jobs[jobIndex];
-  job.pendingRefresh = false;
 
   if (tabUrl && job.url && normalizeJobUrl(tabUrl) !== normalizeJobUrl(job.url)) {
     console.warn(`[Upwork Tracker] Tab ${tabId} URL changed; skipping update for "${job.title}".`);
-    jobs[jobIndex] = job;
+    clearRefreshState(jobs, jobIndex, tabId);
     await chrome.storage.local.set({ jobs });
     return;
   }
 
   try {
-    await sleep(500);
-    const newData = await extractFromTabWithRetry(tabId);
+    console.log(`[Upwork Tracker] Tab ${tabId} reload complete — reading Last viewed for "${job.title}"`);
+    await sleep(300);
+    const newData = await extractFromTabWithRetry(tabId, 4, 1000);
     if (!newData) {
+      job.pendingRefresh = false;
+      refreshByTab.delete(tabId);
       job.lastExtractionError = 'No data returned from page. Retrying…';
       jobs[jobIndex] = job;
       await chrome.storage.local.set({ jobs });
@@ -359,21 +462,25 @@ async function processRefreshedTab(tabId, tabUrl) {
     }
 
     if (newData.lastViewedAbsent && !newData.lastViewed) {
-      await applyExtractedData(tabId, job.id, newData);
+      await finishJobCheck(tabId, job.id, newData);
       return;
     }
 
     if (!isValidLastViewedDisplay(newData.lastViewed)) {
-      job.lastExtractionError = 'Could not read "Last viewed by client" (page not ready). Retrying…';
+      job.pendingRefresh = false;
+      refreshByTab.delete(tabId);
+      job.lastExtractionError = 'Page not ready. Retrying…';
       jobs[jobIndex] = job;
       await chrome.storage.local.set({ jobs });
       scheduleExtractRetry(tabId, job.id);
       return;
     }
 
-    await applyExtractedData(tabId, job.id, newData);
+    await finishJobCheck(tabId, job.id, newData);
   } catch (err) {
     console.error(`[Upwork Tracker] Error processing refreshed tab ${tabId}:`, err);
+    job.pendingRefresh = false;
+    refreshByTab.delete(tabId);
     job.lastExtractionError = err.message || 'Extraction failed';
     jobs[jobIndex] = job;
     await chrome.storage.local.set({ jobs });
@@ -382,9 +489,16 @@ async function processRefreshedTab(tabId, tabUrl) {
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete') {
-    processRefreshedTab(tabId, tab.url);
+  if (changeInfo.status !== 'complete') return;
+  if (!refreshByTab.has(tabId)) {
+    chrome.storage.local.get('jobs').then(({ jobs }) => {
+      if (jobs?.some((j) => j.tabId === tabId && j.pendingRefresh)) {
+        processRefreshedTab(tabId, tab.url);
+      }
+    });
+    return;
   }
+  processRefreshedTab(tabId, tab.url);
 });
 
 // ---------- TAB CLOSED CLEANUP ----------
@@ -414,10 +528,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
   try {
     await chrome.tabs.get(job.tabId);
-    job.pendingRefresh = true;
-    await chrome.storage.local.set({ jobs });
-    console.log(`[Upwork Tracker] Refreshing tab ${job.tabId} for job "${job.title}"`);
-    await chrome.tabs.reload(job.tabId, { bypassCache: true });
+    await runScheduledCheck(job);
   } catch {
     console.warn(`[Upwork Tracker] Tab ${job.tabId} no longer exists, removing job.`);
     const newJobs = jobs.filter((j) => j.id !== jobId);

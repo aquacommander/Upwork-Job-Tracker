@@ -599,7 +599,7 @@ function extractionScript() {
   }
 
   const captchaDetected = detectCaptchaOrBlocked();
-  const { root: activityRoot, best: readyBest } = waitForActivityReady(10000);
+  const { root: activityRoot, best: readyBest } = waitForActivityReady(4000);
   const bodyText = document.body?.innerText || '';
   const statsText = activityRoot ? activityRoot.innerText : bodyText;
 
