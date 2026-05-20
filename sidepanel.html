@@ -17,6 +17,20 @@
       border-radius: 6px;
       border: 1px solid #e0e0e0;
     }
+    .job-item.needs-verification {
+      border-color: #e67e22;
+      background: #fff8f0;
+    }
+    .warning-banner {
+      margin: 6px 0;
+      padding: 6px 8px;
+      background: #fdebd0;
+      border: 1px solid #e67e22;
+      border-radius: 4px;
+      font-size: 11px;
+      color: #a04000;
+      line-height: 1.4;
+    }
     .job-title { font-weight: bold; margin-bottom: 4px; word-break: break-word; }
     .details { font-size: 12px; color: #555; line-height: 1.5; }
     .change-log {
@@ -65,6 +79,7 @@
   <div id="status"></div>
   <div id="debug-section"></div>
   <div id="debug-toggle">Show Debug Info</div>
+  <script src="extractor-shared.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

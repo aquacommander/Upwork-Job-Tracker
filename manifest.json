@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Upwork Job Tracker",
-  "version": "2.2",
+  "version": "2.4",
   "description": "Monitor Upwork job postings via side panel. Auto‑refreshes tabs, shows previous/new times, and notifies when the client views.",
   "permissions": [
     "storage",
