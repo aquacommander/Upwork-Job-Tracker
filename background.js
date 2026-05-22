@@ -216,10 +216,10 @@ function notifyCaptcha(job) {
 
 function updateSecondaryFields(job, data) {
   if (data.title) job.title = data.title;
-  if (data.proposals) job.proposals = data.proposals;
-  if (data.interviewing) job.interviewing = data.interviewing;
-  if (data.invitesSent) job.invitesSent = data.invitesSent;
-  if (data.unansweredInvites) job.unansweredInvites = data.unansweredInvites;
+  if (data.proposals != null) job.proposals = data.proposals;
+  if (data.interviewing != null) job.interviewing = data.interviewing;
+  if (data.invitesSent != null) job.invitesSent = data.invitesSent;
+  if (data.unansweredInvites != null) job.unansweredInvites = data.unansweredInvites;
 }
 
 function recordComparison(job, entry) {

@@ -610,7 +610,8 @@ function extractionScript() {
   );
 
   const proposals = matchField(statsText, [
-    /Proposals:\s*([\d,\-–to\s]+?)(?=\n|Interviewing|Last viewed|Invites sent|Unanswered|$)/i
+    /Proposals:\s*([\d,\-–to\s+]+?)(?=\n|Interviewing|Last viewed|Invites sent|Unanswered|$)/i,
+    /Proposals:\s*([^\n]+?)(?=\n|Interviewing|Last viewed|Invites sent|Unanswered|$)/i
   ]);
 
   let lastViewedResult = findLastViewedByClient(activityRoot);
