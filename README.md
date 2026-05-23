@@ -39,23 +39,6 @@ A Chrome extension (Manifest V3) that monitors Upwork job postings you've applie
 
 ---
 
-## File Structure
-
-```
-upwork-job-tracker/
-├── manifest.json          # Extension manifest (MV3)
-├── background.js          # Service worker — alarms, tab reload, extraction, notifications
-├── extractor-shared.js    # Shared extraction logic (injected into job tabs + used in sidepanel)
-├── sidepanel.html         # Side panel UI markup and styles
-├── sidepanel.js           # Side panel logic — rendering, add/remove jobs, appearance
-├── themes.js              # Theme presets and default appearance config
-└── icons/
-    ├── icon16.png
-    ├── icon48.png
-    └── icon128.png
-```
-
----
 
 ## Permissions Used
 
