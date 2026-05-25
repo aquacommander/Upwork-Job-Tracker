@@ -40,21 +40,6 @@ A Chrome extension (Manifest V3) that monitors Upwork job postings you've applie
 ---
 
 
-## Permissions Used
-
-| Permission | Reason |
-|---|---|
-| `storage` | Persist tracked jobs and appearance settings |
-| `alarms` | Schedule periodic tab refreshes |
-| `notifications` | Desktop alerts when client views change |
-| `tabs` | Reload tracked job tabs and read their URLs |
-| `scripting` | Inject the extraction script into Upwork job pages |
-| `activeTab` | Read the currently active tab when adding a job |
-| `sidePanel` | Render the tracker UI in Chrome's side panel |
-| `*://*.upwork.com/*` | Host permission to run scripts on Upwork pages |
-
----
-
 ## Supported Proposal Formats
 
 The extractor handles all formats Upwork uses for the proposals field:
