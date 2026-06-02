@@ -40,17 +40,6 @@ A Chrome extension  that monitors Upwork job postings you've applied to. It relo
 ---
 
 
-## Supported Proposal Formats
-
-The extractor handles all formats Upwork uses for the proposals field:
-
-- `50+`
-- `20 to 50`
-- `5-10`
-- `10`
-- `Less than 5`
-
----
 
 ## Themes
 
