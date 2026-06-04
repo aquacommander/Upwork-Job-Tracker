@@ -14,8 +14,6 @@ A Chrome extension  that monitors Upwork job postings you've applied to. It relo
 - **Custom background** — upload any image as a panel background with adjustable opacity
 - **Debug log** — expandable in-panel log for troubleshooting extraction issues
 
----
-
 ## How It Works
 
 1. Open an Upwork job posting you've applied to in a Chrome tab
