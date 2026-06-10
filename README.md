@@ -61,7 +61,3 @@ A Chrome extension  that monitors Upwork job postings you've applied to. It relo
 - The extension stores all data locally in `chrome.storage.local` — nothing is sent to any external server.
 
 ---
-
-## Version
-
-**3.4**
