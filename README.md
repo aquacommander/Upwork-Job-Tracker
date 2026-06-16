@@ -33,26 +33,7 @@ A Chrome extension  that monitors Upwork job postings you've applied to. It relo
 4. Click **Load unpacked** and select the project folder
 5. The extension icon appears in the toolbar — click it to open the side panel
 
----
-
-
-
-## Themes
-
-| Theme | Emoji | Style |
-|---|---|---|
-| Upwork Pro | 💼 | Dark green — default Upwork feel |
-| Ocean Dive | 🌊 | Deep blue tones |
-| Forest Trail | 🌲 | Dark green nature palette |
-| Sunset Photo | 🌅 | Warm orange and rose |
-| Neon Gaming | 🎮 | Purple/cyan neon dark |
-| Coffee Shop | ☕ | Warm brown and tan |
-| Lavender Art | 🎨 | Soft purple and violet |
-| Clean Light | ✨ | Light mode, minimal |
-| Rose Gold | 🌸 | Pink and rose tones |
-
----
-
+--
 ## Notes
 
 - The tracked job tab must remain **open** in Chrome. The extension reloads that specific tab — it does not open new tabs.
