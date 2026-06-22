@@ -3,8 +3,6 @@
 A Chrome extension  that monitors Upwork job postings you've applied to. It reloads tracked job tabs on a schedule, reads the Last viewed by client timestamp, and sends a desktop notification the moment the client views your proposal more recently than before.
 
 ## Features
-
-- **Automatic tab refresh** — reloads each tracked job tab on a configurable interval (default: every 5 minutes)
 - **Last viewed tracking** — reads and compares the "Last viewed by client" time in seconds for precise change detection
 - **Instant notifications** — alerts you when the client views your proposal for the first time, or views it again more recently
 - **Live stats** — displays proposals count, interviewing count, invites sent, and unanswered invites per job
