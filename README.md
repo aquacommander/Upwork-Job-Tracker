@@ -30,12 +30,3 @@ A Chrome extension  that monitors Upwork job postings you've applied to. It relo
 4. Click **Load unpacked** and select the project folder
 5. The extension icon appears in the toolbar — click it to open the side panel
 
---
-## Notes
-
-- The tracked job tab must remain **open** in Chrome. The extension reloads that specific tab — it does not open new tabs.
-- If the tab is closed, the job is automatically removed from tracking.
-- If Upwork shows a CAPTCHA on a tracked tab, the extension will warn you. Complete the verification manually, then remove and re-add the job.
-- The extension stores all data locally in `chrome.storage.local` — nothing is sent to any external server.
-
----
