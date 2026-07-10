@@ -11,8 +11,6 @@ A Chrome extension  that monitors Upwork job postings you've applied to. It relo
 - **Themes** — 9 built-in color themes (Upwork Pro, Ocean Dive, Forest Trail, Sunset Photo, Neon Gaming, Coffee Shop, Lavender Art, Clean Light, Rose Gold)
 - **Custom background** — upload any image as a panel background with adjustable opacity
 
-## How It Works
-
 1. Open an Upwork job posting you've applied to in a Chrome tab
 2. Click the extension icon to open the side panel
 3. Click **Track Current Job Tab**
