@@ -19,12 +19,3 @@ A Chrome extension  that monitors Upwork job postings you've applied to. It relo
 6. If the client viewed more recently than the stored baseline, a desktop notification fires immediately
 
 ---
-
-## Installation (Developer / Unpacked)
-
-1. Clone or download this repository
-2. Open Chrome and go to `chrome://extensions`
-3. Enable **Developer mode** (top-right toggle)
-4. Click **Load unpacked** and select the project folder
-5. The extension icon appears in the toolbar — click it to open the side panel
-
