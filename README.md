@@ -9,6 +9,5 @@ A Chrome extension  that monitors Upwork job postings you've applied to. It relo
 - **Per-job check interval** — set a custom refresh rate (in minutes) for each tracked job independently
 - **CAPTCHA detection** — warns you if Upwork shows a verification challenge on a tracked tab
 - **Themes** — 9 built-in color themes (Upwork Pro, Ocean Dive, Forest Trail, Sunset Photo, Neon Gaming, Coffee Shop, Lavender Art, Clean Light, Rose Gold)
-- **Custom background** — upload any image as a panel background with adjustable opacity
 
 ---
